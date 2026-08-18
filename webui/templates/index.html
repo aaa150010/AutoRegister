@@ -5388,6 +5388,16 @@ let CONFIG_EMAIL_ACTIVE_SECTION_V2 = '通用邮箱 / OTP';
 let CONFIG_SMS_ACTIVE_SECTION_V2 = '通用接码';
 let CONFIG_CODEX_ACTIVE_SECTION_V2 = '基础配置';
 const CONFIG_PENDING_UPDATES = {};
+let CONFIG_SPECIAL_SAVE_IN_FLIGHT = false;
+const ROXY_SELECTION_KEYS = new Set(['ROXY_WORKSPACE_ID', 'ROXY_PROJECT_ID']);
+
+function setConfigSaveButtonsDisabled(disabled) {
+  $$('[data-save-config-v2]').forEach(btn => {
+    btn.disabled = !!disabled;
+  });
+  const roxyBtn = $('#btnSaveRoxyWorkspaceV2');
+  if (roxyBtn) roxyBtn.disabled = !!disabled || !$('#roxyWorkspaceSelectV2')?.value;
+}
 
 function configGroups() {
   const groups = {};
@@ -6132,8 +6142,10 @@ async function loadConfig() {
     CONFIG = await api('/api/config');
     renderConfigLayoutV2();
     bindConfigLayoutV2();
+    return true;
   } catch(e) {
     showToast('加载配置失败: ' + e.message);
+    return false;
   }
 }
 
@@ -6176,22 +6188,38 @@ async function saveRoxyWorkspaceSelection() {
   const opt = sel ? sel.selectedOptions[0] : null;
   const workspaceId = opt ? (opt.dataset.workspaceId || '') : '';
   const projectId = opt ? (opt.dataset.projectId || '') : '';
-  if (!workspaceId) return;
+  if (!workspaceId || CONFIG_SPECIAL_SAVE_IN_FLIGHT) return;
+  CONFIG_SPECIAL_SAVE_IN_FLIGHT = true;
+  setConfigSaveButtonsDisabled(true);
+  // Do not let a stale manual edit win when this dedicated selector is used.
+  CONFIG_PENDING_UPDATES.ROXY_WORKSPACE_ID = workspaceId;
+  CONFIG_PENDING_UPDATES.ROXY_PROJECT_ID = projectId;
   try {
     const r = await api('/api/config', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({updates: {ROXY_WORKSPACE_ID: workspaceId, ROXY_PROJECT_ID: projectId}}),
     });
-    const fw = CONFIG.find(x => x.key === 'ROXY_WORKSPACE_ID');
-    const fp = CONFIG.find(x => x.key === 'ROXY_PROJECT_ID');
-    if (fw) fw.value = workspaceId;
-    if (fp) fp.value = projectId;
-    if (status) status.innerHTML = `✅ 已保存团队 ID：<span class="mono">${esc(workspaceId)}</span>，项目 ID：<span class="mono">${esc(projectId || '未设置')}</span>`;
+    // Re-read the canonical server-side values. This also rebuilds the form
+    // after the special save, so an old DOM field cannot be submitted later.
+    delete CONFIG_PENDING_UPDATES.ROXY_WORKSPACE_ID;
+    delete CONFIG_PENDING_UPDATES.ROXY_PROJECT_ID;
+    const synced = await loadConfig();
+    if (!synced) {
+      const fw = CONFIG.find(x => x.key === 'ROXY_WORKSPACE_ID');
+      const fp = CONFIG.find(x => x.key === 'ROXY_PROJECT_ID');
+      if (fw) fw.value = workspaceId;
+      if (fp) fp.value = projectId;
+      renderConfigLayoutV2();
+    }
+    const nextStatus = $('#roxyWorkspaceStatusV2');
+    if (nextStatus) nextStatus.innerHTML = `✅ 已保存团队 ID：<span class="mono">${esc(workspaceId)}</span>，项目 ID：<span class="mono">${esc(projectId || '未设置')}</span>`;
     showToast(r.reloaded ? 'Roxy 团队/项目已保存并生效' : 'Roxy 团队/项目已保存');
-    renderConfigLayoutV2();
   } catch(e) {
     if (status) status.innerHTML = `<span style="color:var(--red);">保存失败：${esc(e.message)}</span>`;
+  } finally {
+    CONFIG_SPECIAL_SAVE_IN_FLIGHT = false;
+    setConfigSaveButtonsDisabled(false);
   }
 }
 
@@ -6220,14 +6248,24 @@ $('#tab-config').addEventListener('input', trackConfigFieldChange);
 $('#tab-config').addEventListener('change', trackConfigFieldChange);
 
 async function saveConfigUpdates(triggerBtn) {
+  if (CONFIG_SPECIAL_SAVE_IN_FLIGHT) {
+    showToast('团队选择正在保存，请稍候');
+    return;
+  }
   const updates = {...CONFIG_PENDING_UPDATES};
   const seen = new Set();
   $$('#configCardsV2 [data-key], #configSectionsV2 [data-key]').forEach(el => {
     const f = CONFIG.find(x => x.key === el.dataset.key);
     if (!f || seen.has(f.key)) return;
+    // Workspace/project IDs have a dedicated atomic selector. Only include
+    // them in the generic save when the user explicitly edited those fields.
+    if (ROXY_SELECTION_KEYS.has(f.key) && !Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key)) return;
     seen.add(f.key);
     updates[f.key] = readConfigElementValue(el, f);
   });
+  for (const key of ROXY_SELECTION_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, key)) delete updates[key];
+  }
   const buttons = [triggerBtn, ...$$('#tab-config [data-save-config-v2]')].filter(Boolean);
   buttons.forEach(btn => { btn.disabled = true; });
   try {

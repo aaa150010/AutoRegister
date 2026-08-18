@@ -173,6 +173,7 @@ def _job_status_counts(rows: list[dict]) -> dict:
 def create_app(auth_code: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates")
     _prepared_downloads: dict[str, dict] = {}
+    _config_update_lock = threading.RLock()
 
     def _put_prepared_download(content: bytes, filename: str, mimetype: str = "application/zip") -> str:
         now = time.time()
@@ -2510,22 +2511,26 @@ def create_app(auth_code: str | None = None) -> Flask:
         updates = data.get("updates") if isinstance(data.get("updates"), dict) else data
         if not isinstance(updates, dict) or not updates:
             return jsonify({"ok": False, "error": "无更新内容"}), 400
-        try:
-            result = config_editor.update_config(updates)
-        except Exception as exc:
-            logger.exception("配置写入失败")
-            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        # Serialize the complete write + reload transaction. A threaded Flask
+        # server can receive the dedicated Roxy save and the generic config
+        # save at nearly the same time.
+        with _config_update_lock:
+            try:
+                result = config_editor.update_config(updates)
+            except Exception as exc:
+                logger.exception("配置写入失败")
+                return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
 
-        # 写盘成功后立即热加载所有 config 子模块，让运行时代码看到新值。
-        reload_ok = True
-        reload_err = ""
-        try:
-            import config as _config_pkg
-            _config_pkg.reload_all()
-        except Exception as exc:
-            reload_ok = False
-            reload_err = f"{type(exc).__name__}: {exc}"
-            logger.exception("配置热加载失败")
+            # 写盘成功后立即热加载所有 config 子模块，让运行时代码看到新值。
+            reload_ok = True
+            reload_err = ""
+            try:
+                import config as _config_pkg
+                _config_pkg.reload_all()
+            except Exception as exc:
+                reload_ok = False
+                reload_err = f"{type(exc).__name__}: {exc}"
+                logger.exception("配置热加载失败")
 
         return jsonify({
             "ok": True,

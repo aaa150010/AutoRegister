@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = _PROJECT_ROOT / ".env"
 _LOADED = False
+_ENV_WRITE_LOCK = threading.RLock()
 
 # 这些多行列表字段允许用空值显式覆盖为 []。
 # 例如 WebUI 清空代理池后会写入 PROXY_POOL="" / PROXY_POOL="[]"，不能再回退到源码默认本地代理。
@@ -129,43 +131,46 @@ def write_env_values(updates: dict[str, str]) -> list[str]:
     if not updates:
         return []
 
-    existing_lines: list[str] = []
-    if _ENV_PATH.exists():
-        existing_lines = _ENV_PATH.read_text(encoding="utf-8").splitlines()
+    # Flask runs with threaded requests. Keep the read/modify/replace sequence
+    # together so two near-simultaneous config saves cannot lose one another.
+    with _ENV_WRITE_LOCK:
+        existing_lines: list[str] = []
+        if _ENV_PATH.exists():
+            existing_lines = _ENV_PATH.read_text(encoding="utf-8").splitlines()
 
-    remaining = {str(k): ("" if v is None else str(v)) for k, v in updates.items()}
-    written: list[str] = []
-    out_lines: list[str] = []
-    key_re = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+        remaining = {str(k): ("" if v is None else str(v)) for k, v in updates.items()}
+        written: list[str] = []
+        out_lines: list[str] = []
+        key_re = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
-    for line in existing_lines:
-        m = key_re.match(line)
-        if not m:
-            out_lines.append(line)
-            continue
-        key = m.group(1)
-        if key in remaining:
-            out_lines.append(f"{key}={_escape_env_value(remaining.pop(key))}")
-            written.append(key)
-        else:
-            out_lines.append(line)
+        for line in existing_lines:
+            m = key_re.match(line)
+            if not m:
+                out_lines.append(line)
+                continue
+            key = m.group(1)
+            if key in remaining:
+                out_lines.append(f"{key}={_escape_env_value(remaining.pop(key))}")
+                written.append(key)
+            else:
+                out_lines.append(line)
 
-    if remaining:
-        if out_lines and out_lines[-1].strip():
-            out_lines.append("")
-        out_lines.append("# ---- updated by WebUI / config.env_loader ----")
-        for key, value in remaining.items():
-            out_lines.append(f"{key}={_escape_env_value(value)}")
-            written.append(key)
+        if remaining:
+            if out_lines and out_lines[-1].strip():
+                out_lines.append("")
+            out_lines.append("# ---- updated by WebUI / config.env_loader ----")
+            for key, value in remaining.items():
+                out_lines.append(f"{key}={_escape_env_value(value)}")
+                written.append(key)
 
-    text = "\n".join(out_lines).rstrip() + "\n"
-    tmp = _ENV_PATH.with_suffix(".env.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(_ENV_PATH)
+        text = "\n".join(out_lines).rstrip() + "\n"
+        tmp = _ENV_PATH.with_suffix(".env.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(_ENV_PATH)
 
-    # 让当前进程立刻看到新值
-    load_env(override=True)
-    return written
+        # 让当前进程立刻看到新值
+        load_env(override=True)
+        return written
 
 
 def _coerce_env_value(raw: str, default, vtype: str | None = None):

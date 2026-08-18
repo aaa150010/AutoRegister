@@ -132,11 +132,12 @@ WebUI 配置页保存这些字段时会写入 `.env`（不是 config 源码）�
 
 ## 快速开始
 
-### WebUI 授权码
+### WebUI 登录保护（可选）
 
-WebUI 启动后，除 `/login` 外所有页面和 `/api/*` 接口都会校验授权码。推荐在 `.env` 中配置：
+默认关闭登录保护，启动后直接打开 WebUI，不需要授权码。需要保护时，在 `.env` 中显式启用：
 
 ```dotenv
+WEBUI_AUTH_ENABLED=1
 WEBUI_AUTH_CODE=你的授权码
 ```
 
@@ -146,7 +147,7 @@ WEBUI_AUTH_CODE=你的授权码
 python web.py --auth-code 你的授权码
 ```
 
-优先级：`--auth-code` > `.env`/环境变量。若都未设置，启动时会在日志中生成并打印本次临时授权码。接口调用可使用登录后的 Cookie，或传 `X-Auth-Code: <授权码>` / `Authorization: Bearer <授权码>`。
+命令行传入 `--auth-code` 也会自动启用登录保护。启用后，接口可使用登录后的 Cookie，或传 `X-Auth-Code: <授权码>` / `Authorization: Bearer <授权码>`。
 
 `WEBUI_SESSION_SECRET` 可选；未设置时会从固定授权码派生稳定的 Session 签名密钥，修改授权码后已有登录会自动失效。
 
@@ -425,6 +426,8 @@ CPA_MANAGEMENT_KEY = "你的CPA管理密钥"
 ## WebUI 推荐方式
 
 推荐使用项目根目录单脚本后台管理：
+
+macOS 用户也可以直接双击 `start-webui.command`，首次启动会自动创建虚拟环境并安装依赖。
 
 ```bash
 ./webui.sh start      # 启动

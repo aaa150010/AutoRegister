@@ -18,11 +18,22 @@ AUTH_ENV_KEYS = ("WEBUI_AUTH_CODE", "AUTH_CODE", "WEB_AUTH_CODE")
 _SESSION_KEY = "webui_auth_ok"
 _AUTH_CODE: str | None = None
 _GENERATED = False
+_AUTH_ENABLED = False
+
+
+def auth_enabled() -> bool:
+    """Return whether WebUI login protection was explicitly enabled."""
+    return _AUTH_ENABLED
+
+
+def _is_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 def init_auth(app: Any, *, auth_code: str | None = None) -> str:
-    """初始化授权码和 Flask session。未显式配置时生成临时授权码。"""
-    global _AUTH_CODE, _GENERATED
+    """Initialize optional WebUI auth and the Flask session."""
+    global _AUTH_CODE, _GENERATED, _AUTH_ENABLED
 
+    explicit_code = bool((auth_code or "").strip())
     code = (auth_code or "").strip()
     if not code:
         try:
@@ -37,6 +48,21 @@ def init_auth(app: Any, *, auth_code: str | None = None) -> str:
                 code = (os.getenv(key) or "").strip()
                 if code:
                     break
+
+    # Local WebUI is open by default. Supplying --auth-code remains an
+    # explicit opt-in for callers that still want the protected mode.
+    _AUTH_ENABLED = explicit_code or _is_truthy(os.getenv("WEBUI_AUTH_ENABLED"))
+    if not _AUTH_ENABLED:
+        _AUTH_CODE = ""
+        _GENERATED = False
+        session_secret = os.getenv("WEBUI_SESSION_SECRET") or secrets.token_hex(32)
+        app.secret_key = session_secret
+        app.config.update(
+            SESSION_COOKIE_HTTPONLY=True,
+            SESSION_COOKIE_SAMESITE="Lax",
+            PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+        )
+        return ""
 
     if not code:
         code = secrets.token_urlsafe(18)
@@ -83,6 +109,8 @@ def code_is_valid(code: str) -> bool:
 
 
 def request_is_authorized() -> bool:
+    if not auth_enabled():
+        return True
     if session.get(_SESSION_KEY) is True:
         return True
     return code_is_valid(_extract_auth_code())
@@ -104,6 +132,8 @@ def _unauthorized_response():
 def register_auth_routes(app: Any) -> None:
     @app.before_request
     def _require_auth_code():
+        if not auth_enabled():
+            return None
         endpoint = request.endpoint or ""
         if endpoint in {"auth_login", "auth_logout", "static"}:
             return None
@@ -115,6 +145,8 @@ def register_auth_routes(app: Any) -> None:
 
     @app.route("/login", methods=["GET", "POST"], endpoint="auth_login")
     def _auth_login():
+        if not auth_enabled():
+            return redirect("/")
         error = ""
         next_url = request.values.get("next") or "/"
         if not str(next_url).startswith("/") or str(next_url).startswith("//"):

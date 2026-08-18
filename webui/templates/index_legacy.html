@@ -2822,6 +2822,15 @@ let CONFIG_EMAIL_ACTIVE_SECTION = '通用邮箱 / OTP';
 let CONFIG_SMS_ACTIVE_SECTION = '通用接码';
 let CONFIG_CODEX_ACTIVE_SECTION = '基础配置';
 const CONFIG_PENDING_UPDATES = {};
+let CONFIG_SPECIAL_SAVE_IN_FLIGHT = false;
+const ROXY_SELECTION_KEYS = new Set(['ROXY_WORKSPACE_ID', 'ROXY_PROJECT_ID']);
+
+function setConfigSaveButtonsDisabled(disabled) {
+  const generic = $('#btnSaveConfig');
+  if (generic) generic.disabled = !!disabled;
+  const roxyBtn = $('#btnSaveRoxyWorkspace');
+  if (roxyBtn) roxyBtn.disabled = !!disabled || !$('#roxyWorkspaceSelect')?.value;
+}
 
 function configGroups() {
   const groups = {};
@@ -3113,9 +3122,11 @@ async function loadConfig() {
     CONFIG = await api('/api/config');
     renderConfigTabs();
     renderConfigPanel();
+    return true;
   } catch(e) {
     $('#configTabs').innerHTML = '';
     $('#configForm').innerHTML = `<div class="banner warn">${esc(e.message)}</div>`;
+    return false;
   }
 }
 
@@ -3187,22 +3198,35 @@ async function saveRoxyWorkspaceSelection() {
   const opt = sel ? sel.selectedOptions[0] : null;
   const workspaceId = opt ? (opt.dataset.workspaceId || '') : '';
   const projectId = opt ? (opt.dataset.projectId || '') : '';
-  if (!workspaceId) return;
+  if (!workspaceId || CONFIG_SPECIAL_SAVE_IN_FLIGHT) return;
+  CONFIG_SPECIAL_SAVE_IN_FLIGHT = true;
+  setConfigSaveButtonsDisabled(true);
+  CONFIG_PENDING_UPDATES.ROXY_WORKSPACE_ID = workspaceId;
+  CONFIG_PENDING_UPDATES.ROXY_PROJECT_ID = projectId;
   try {
     const r = await api('/api/config', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({updates: {ROXY_WORKSPACE_ID: workspaceId, ROXY_PROJECT_ID: projectId}}),
     });
-    const fw = CONFIG.find(x => x.key === 'ROXY_WORKSPACE_ID');
-    const fp = CONFIG.find(x => x.key === 'ROXY_PROJECT_ID');
-    if (fw) fw.value = workspaceId;
-    if (fp) fp.value = projectId;
-    status.innerHTML = `✅ 已保存团队 ID：<span class="mono">${esc(workspaceId)}</span>，项目 ID：<span class="mono">${esc(projectId || '未设置')}</span>`;
+    delete CONFIG_PENDING_UPDATES.ROXY_WORKSPACE_ID;
+    delete CONFIG_PENDING_UPDATES.ROXY_PROJECT_ID;
+    const synced = await loadConfig();
+    if (!synced) {
+      const fw = CONFIG.find(x => x.key === 'ROXY_WORKSPACE_ID');
+      const fp = CONFIG.find(x => x.key === 'ROXY_PROJECT_ID');
+      if (fw) fw.value = workspaceId;
+      if (fp) fp.value = projectId;
+      renderConfigPanel();
+    }
+    const nextStatus = $('#roxyWorkspaceStatus');
+    if (nextStatus) nextStatus.innerHTML = `✅ 已保存团队 ID：<span class="mono">${esc(workspaceId)}</span>，项目 ID：<span class="mono">${esc(projectId || '未设置')}</span>`;
     showToast(r.reloaded ? 'Roxy 团队/项目已保存并生效' : 'Roxy 团队/项目已保存');
-    renderConfigPanel();
   } catch(e) {
-    status.innerHTML = `<span style="color:var(--red);">保存失败：${esc(e.message)}</span>`;
+    if (status) status.innerHTML = `<span style="color:var(--red);">保存失败：${esc(e.message)}</span>`;
+  } finally {
+    CONFIG_SPECIAL_SAVE_IN_FLIGHT = false;
+    setConfigSaveButtonsDisabled(false);
   }
 }
 function readConfigElementValue(el, f) {
@@ -3230,12 +3254,20 @@ $('#configForm').addEventListener('change', (e) => {
 });
 
 $('#btnSaveConfig').addEventListener('click', async () => {
+  if (CONFIG_SPECIAL_SAVE_IN_FLIGHT) {
+    showToast('团队选择正在保存，请稍候');
+    return;
+  }
   const updates = {...CONFIG_PENDING_UPDATES};
   $$('#tab-config [data-key]').forEach(el => {
     const f = CONFIG.find(x => x.key === el.dataset.key);
     if (!f) return;
+    if (ROXY_SELECTION_KEYS.has(f.key) && !Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key)) return;
     updates[f.key] = readConfigElementValue(el, f);
   });
+  for (const key of ROXY_SELECTION_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, key)) delete updates[key];
+  }
   $('#btnSaveConfig').disabled = true;
   try {
     const r = await api('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({updates}) });
